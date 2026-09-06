@@ -152,12 +152,19 @@ fn render_stamp(text: &str, font_size: f64, r: u8, g: u8, b: u8, a: u8) -> Resul
     let font =
         fontdue::Font::from_bytes(STAMP_FONT, fontdue::FontSettings::default()).map_err(err)?;
 
-    let mut glyphs: Vec<(f32, fontdue::Metrics, Vec<u8>)> = Vec::new();
-    let mut pen = 0.0f32;
-    for ch in text.chars() {
-        let (m, bitmap) = font.rasterize(ch, px);
-        glyphs.push((pen, m, bitmap));
-        pen += m.advance_width;
+    let metrics = font.horizontal_line_metrics(px);
+    let line_h = metrics
+        .map(|m| (m.ascent - m.descent).round() as i32)
+        .unwrap_or((px * 1.2).round() as i32);
+    let mut glyphs: Vec<(f32, i32, fontdue::Metrics, Vec<u8>)> = Vec::new();
+    for (li, line) in text.split('\n').enumerate() {
+        let baseline = -(line_h * li as i32); // up-positive raster space
+        let mut pen = 0.0f32;
+        for ch in line.chars() {
+            let (m, bitmap) = font.rasterize(ch, px);
+            glyphs.push((pen, baseline, m, bitmap));
+            pen += m.advance_width;
+        }
     }
 
     // ink bbox in raster space (top-down, baseline at 0)
@@ -165,13 +172,13 @@ fn render_stamp(text: &str, font_size: f64, r: u8, g: u8, b: u8, a: u8) -> Resul
     let mut right = i32::MIN;
     let mut top = i32::MIN;
     let mut bottom = i32::MAX;
-    for (p, m, _) in &glyphs {
+    for (p, bl, m, _) in &glyphs {
         left = left.min((*p) as i32 + m.xmin);
         right = right.max((*p) as i32 + m.xmin + m.width as i32);
         // fontdue: ymin = bitmap BOTTOM relative to baseline (up-positive);
         // bitmap row 0 is the top, at ymin + height
-        top = top.max(m.ymin + m.height as i32);
-        bottom = bottom.min(m.ymin);
+        top = top.max(bl + m.ymin + m.height as i32);
+        bottom = bottom.min(bl + m.ymin);
     }
     let (w, h) = ((right - left) as usize, (top - bottom) as usize);
     if w == 0 || h == 0 || w > 16000 || h > 16000 {
@@ -180,10 +187,10 @@ fn render_stamp(text: &str, font_size: f64, r: u8, g: u8, b: u8, a: u8) -> Resul
 
     let mut rgb = vec![0u8; w * h * 3];
     let mut alpha = vec![0u8; w * h];
-    for (p, m, bitmap) in &glyphs {
+    for (p, bl, m, bitmap) in &glyphs {
         let gx = (*p) as i32 + m.xmin - left;
         // canvas row 0 = ink top; glyph bitmap top sits at (ymin + height) above baseline
-        let gy = top - (m.ymin + m.height as i32);
+        let gy = top - (bl + m.ymin + m.height as i32);
         for row in 0..m.height {
             for col in 0..m.width {
                 let cov = bitmap[row * m.width + col];

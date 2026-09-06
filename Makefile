@@ -1,4 +1,4 @@
-.PHONY: dev build bundle test clean
+.PHONY: dev build bundle win-bundle win-build test clean
 
 dev: ## run the app in dev mode (vite + tauri)
 	cargo tauri dev
@@ -9,6 +9,12 @@ build: ## build release binary (frontend + rust)
 
 bundle: ## full installer bundle
 	cargo tauri build
+
+win-bundle: ## windows installer bundle (run on a windows machine)
+	cargo tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc
+
+win-build: ## windows release exe only (run on a windows machine)
+	cargo tauri build --no-bundle --runner cargo-xwin --target x86_64-pc-windows-msvc
 
 test:
 	cd src-tauri && cargo test
