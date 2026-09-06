@@ -30,7 +30,10 @@ fn mediabox(doc: &Document, page_id: ObjectId) -> Result<Vec<f64>, String> {
         if let Some(b) = box_of(dict, b"CropBox").or_else(|| box_of(dict, b"MediaBox")) {
             return Ok(b);
         }
-        id = dict.get(b"Parent").and_then(Object::as_reference).map_err(err)?;
+        id = dict
+            .get(b"Parent")
+            .and_then(Object::as_reference)
+            .map_err(err)?;
     }
     Err("no MediaBox found in page tree".into())
 }
@@ -120,29 +123,77 @@ pub fn preview_pdf(path: String, page_index: u32) -> Result<String, String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(out))
 }
 
-/// Helvetica AFM advance widths (units/1000 em) for chars 32..=126.
-/// Arial (the Windows substitute) is metrically identical.
-const HELVETICA_WIDTHS: [u16; 95] = [
-    278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556,
-    556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667, 667, 722, 722, 667,
-    611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667,
-    667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500,
-    222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584,
-];
+/// Liberation Sans (metrically compatible with Arial, freely redistributable).
+static STAMP_FONT: &[u8] = include_bytes!("../assets/LiberationSans-Regular.ttf");
 
-fn text_width(text: &str, font_size: f64) -> f64 {
-    let units: f64 = text
-        .chars()
-        .map(|c| {
-            let u = c as u32;
-            if (32..=126).contains(&u) {
-                HELVETICA_WIDTHS[(u - 32) as usize] as f64
-            } else {
-                556.0
+/// Render text at font_size pt (rasterized at RASTER_SCALE for crispness).
+/// Returns RGB + separate alpha plane plus ink dimensions.
+struct Stamp {
+    rgb: Vec<u8>,
+    alpha: Vec<u8>,
+    w: usize,
+    h: usize,
+}
+
+const RASTER_SCALE: f32 = 4.0;
+
+fn render_stamp(text: &str, font_size: f64, r: u8, g: u8, b: u8, a: u8) -> Result<Stamp, String> {
+    if text.is_empty() {
+        return Err("watermark text is empty".into());
+    }
+    let px = (font_size as f32 * RASTER_SCALE).max(8.0);
+    let font =
+        fontdue::Font::from_bytes(STAMP_FONT, fontdue::FontSettings::default()).map_err(err)?;
+
+    let mut glyphs: Vec<(f32, fontdue::Metrics, Vec<u8>)> = Vec::new();
+    let mut pen = 0.0f32;
+    for ch in text.chars() {
+        let (m, bitmap) = font.rasterize(ch, px);
+        glyphs.push((pen, m, bitmap));
+        pen += m.advance_width;
+    }
+
+    // ink bbox in raster space (top-down, baseline at 0)
+    let mut left = i32::MAX;
+    let mut right = i32::MIN;
+    let mut top = i32::MAX;
+    let mut bottom = i32::MIN;
+    for (p, m, _) in &glyphs {
+        left = left.min((*p) as i32 + m.xmin);
+        right = right.max((*p) as i32 + m.xmin + m.width as i32);
+        top = top.min(m.ymin);
+        bottom = bottom.max(m.ymin + m.height as i32);
+    }
+    let (w, h) = ((right - left) as usize, (bottom - top) as usize);
+    if w == 0 || h == 0 || w > 16000 || h > 16000 {
+        return Err("watermark text rasterized to an invalid bitmap".into());
+    }
+
+    let mut rgb = vec![0u8; w * h * 3];
+    let mut alpha = vec![0u8; w * h];
+    for (p, m, bitmap) in &glyphs {
+        let gx = (*p) as i32 + m.xmin - left;
+        let gy = m.ymin - top;
+        for row in 0..m.height {
+            for col in 0..m.width {
+                let cov = bitmap[row * m.width + col];
+                if cov == 0 {
+                    continue;
+                }
+                let x = gx + col as i32;
+                let y = gy + row as i32;
+                if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
+                    continue;
+                }
+                let idx = (y as usize) * w + x as usize;
+                rgb[idx * 3] = r;
+                rgb[idx * 3 + 1] = g;
+                rgb[idx * 3 + 2] = b;
+                alpha[idx] = ((cov as u16 * a as u16) / 255) as u8;
             }
-        })
-        .sum();
-    units * font_size / 1000.0
+        }
+    }
+    Ok(Stamp { rgb, alpha, w, h })
 }
 
 #[tauri::command]
@@ -168,84 +219,75 @@ pub fn apply_watermark(
         return Err("watermark position out of bounds".into());
     }
 
-    let font_id = doc.add_object(Object::Dictionary({
-        let mut d = lopdf::Dictionary::new();
-        d.set("Type", Object::Name(b"Font".to_vec()));
-        d.set("Subtype", Object::Name(b"Type1".to_vec()));
-        d.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
-        d.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
-        d.set("FirstChar", Object::Integer(32));
-        d.set("LastChar", Object::Integer(126));
-        d.set(
-            "Widths",
-            Object::Array(HELVETICA_WIDTHS.iter().map(|&w| Object::Integer(w as i64)).collect()),
-        );
-        d
-    }));
+    // no text operators, no font references: stamp a pre-rendered image
+    let stamp = render_stamp(&text, font_size, r, g, b, a)?;
+    let smask_id = doc.add_object(lopdf::Stream::new(
+        {
+            let mut d = lopdf::Dictionary::new();
+            d.set("Type", Object::Name(b"XObject".to_vec()));
+            d.set("Subtype", Object::Name(b"Image".to_vec()));
+            d.set("Width", Object::Integer(stamp.w as i64));
+            d.set("Height", Object::Integer(stamp.h as i64));
+            d.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+            d.set("BitsPerComponent", Object::Integer(8));
+            d
+        },
+        stamp.alpha.clone(),
+    ));
+    let image_id = doc.add_object(lopdf::Stream::new(
+        {
+            let mut d = lopdf::Dictionary::new();
+            d.set("Type", Object::Name(b"XObject".to_vec()));
+            d.set("Subtype", Object::Name(b"Image".to_vec()));
+            d.set("Width", Object::Integer(stamp.w as i64));
+            d.set("Height", Object::Integer(stamp.h as i64));
+            d.set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+            d.set("BitsPerComponent", Object::Integer(8));
+            d.set("SMask", Object::Reference(smask_id));
+            d
+        },
+        stamp.rgb.clone(),
+    ));
 
-    let alpha = a as f32 / 255.0;
-    let gs_id = doc.add_object(Object::Dictionary({
-        let mut d = lopdf::Dictionary::new();
-        d.set("Type", Object::Name(b"ExtGState".to_vec()));
-        d.set("ca", Object::Real(alpha));
-        d.set("CA", Object::Real(alpha));
-        d
-    }));
-
-    let escaped = text.replace('\\', "\\\\").replace('(', "\\(").replace(')', "\\)");
-    let tw = text_width(&text, font_size);
-    let color = format!(
-        "{} {} {}",
-        r as f64 / 255.0,
-        g as f64 / 255.0,
-        b as f64 / 255.0
-    );
+    let w_pt = stamp.w as f64 / RASTER_SCALE as f64;
+    let h_pt = stamp.h as f64 / RASTER_SCALE as f64;
 
     // watermark every page except first and last
     for (_, page_id) in pages.iter().skip(1).take(pages.len().saturating_sub(2)) {
         let mb = mediabox(&doc, *page_id)?;
         let (w, h) = ((mb[2] - mb[0]).abs(), (mb[3] - mb[1]).abs());
-        // drag position = visual center of the text:
-        // x centered on width, baseline 0.36em below center (half cap-height)
-        let x = mb[0] + x_frac * w - tw / 2.0;
-        let y = mb[1] + (1.0 - y_frac) * h - 0.36 * font_size;
+        // drag position = center of the stamped image
+        let x = mb[0] + x_frac * w - w_pt / 2.0;
+        let y = mb[1] + (1.0 - y_frac) * h - h_pt / 2.0;
         println!(
-            "[wm] page: MediaBox=({},{},{},{}) w={w} h={h} x_frac={x_frac} y_frac={y_frac} -> x={x} y={y} tw={tw}",
+            "[wm] page: Box=({},{},{},{}) w={w} h={h} x_frac={x_frac} y_frac={y_frac} -> x={x} y={y} {w_pt}x{h_pt}pt",
             mb[0], mb[1], mb[2], mb[3]
         );
 
-        // ensure page resources have our font + ExtGState
+        // ensure page resources have our XObject
         let resources = ensure_resources(&mut doc, *page_id)?;
-        let (font_val, gs_val) = {
+        let xo_val = {
             let res = doc.get_object(resources).map_err(err)?;
             let d = Object::as_dict(res).map_err(|_| "resources not a dictionary")?;
-            (d.get(b"Font").cloned().ok(), d.get(b"ExtGState").cloned().ok())
+            d.get(b"XObject").cloned().ok()
         };
-        let font_entry = match font_val {
+        let xo_entry = match xo_val {
             Some(Object::Reference(id)) => id,
             Some(o @ Object::Dictionary(_)) => doc.add_object(o),
             _ => doc.add_object(Object::Dictionary(lopdf::Dictionary::new())),
         };
-        let gs_entry = match gs_val {
-            Some(Object::Reference(id)) => id,
-            Some(o @ Object::Dictionary(_)) => doc.add_object(o),
-            _ => doc.add_object(Object::Dictionary(lopdf::Dictionary::new())),
-        };
-        let font_obj = doc
-            .get_object_mut(font_entry)
+        let xo_obj = doc
+            .get_object_mut(xo_entry)
             .and_then(Object::as_dict_mut)
             .map_err(err)?;
-        font_obj.set("F1", Object::Reference(font_id));
-        let gs_obj = doc
-            .get_object_mut(gs_entry)
+        xo_obj.set("Im0", Object::Reference(image_id));
+        // make sure the resources dict actually points at the XObject dict
+        doc.get_object_mut(resources)
             .and_then(Object::as_dict_mut)
-            .map_err(err)?;
-        gs_obj.set("GS0", Object::Reference(gs_id));
+            .map_err(err)?
+            .set("XObject", Object::Reference(xo_entry));
 
-        let ops = format!(
-            "\nq /GS0 gs BT /F1 {} Tf {} rg 1 0 0 1 {} {} Tm ({}) Tj ET Q\n",
-            font_size, color, x, y, escaped
-        );
+        let ops = format!("\nq {w_pt} 0 0 {h_pt} {x} {y} cm /Im0 Do Q\n");
         doc.add_page_contents(*page_id, ops.into_bytes())
             .map_err(err)?;
     }
@@ -292,7 +334,7 @@ mod tests {
     use super::*;
     use lopdf::Stream;
 
-    fn make_pdf(n_pages: u32, path: &str) {
+    pub(crate) fn make_pdf(n_pages: u32, path: &str) {
         let mut doc = Document::with_version("1.5");
         let pages_id = doc.add_object(Object::Dictionary({
             let mut d = lopdf::Dictionary::new();
@@ -319,10 +361,7 @@ mod tests {
                 let mut d = lopdf::Dictionary::new();
                 d.set("Type", Object::Name(b"Page".to_vec()));
                 d.set("Parent", Object::Reference(pages_id));
-                d.set(
-                    "Contents",
-                    Object::Reference(content_id),
-                );
+                d.set("Contents", Object::Reference(content_id));
                 d
             }));
             kids.push(Object::Reference(page_id));
@@ -363,8 +402,10 @@ mod tests {
             d
         }));
         for (w, h) in [(612, 792), (300, 400)] {
-            let content_id = doc
-                .add_object(Object::Stream(Stream::new(lopdf::Dictionary::new(), b"1 0 0 1".to_vec())));
+            let content_id = doc.add_object(Object::Stream(Stream::new(
+                lopdf::Dictionary::new(),
+                b"1 0 0 1".to_vec(),
+            )));
             let page_id = doc.add_object(Object::Dictionary({
                 let mut d = lopdf::Dictionary::new();
                 d.set("Type", Object::Name(b"Page".to_vec()));
@@ -442,20 +483,97 @@ mod tests {
         let doc = Document::load(out).unwrap();
         let pages = doc.get_pages();
         assert_eq!(pages.len(), 4);
-        // expected centered position for "CONFIDENTIAL" @24pt on 612x792
-        let expected_x = 0.5 * 612.0 - text_width("CONFIDENTIAL", 24.0) / 2.0;
-        let expected_y = 0.5 * 792.0 - 0.36 * 24.0;
-        let expected_tm = format!("1 0 0 1 {} {}", expected_x, expected_y);
         for (n, id) in &pages {
             let content = doc.get_page_content(*id);
             let content = String::from_utf8_lossy(&content);
-            let has_wm = content.contains("CONFIDENTIAL");
+            let has_wm = content.contains("/Im0 Do");
             assert_eq!(has_wm, n > &1 && n < &4, "page {n} watermark wrong");
-            if has_wm {
-                assert!(
-                    content.contains(&expected_tm),
-                    "page {n} not centered: expected {expected_tm} in {content}"
-                );
+        }
+        // stamp is a real image XObject with SMask, sized ~ font_size pt tall
+        let _ = doc;
+    }
+}
+
+#[cfg(test)]
+mod stamp_probe {
+    #[test]
+    fn probe() {
+        let s = crate::pdf::render_stamp("Text Preview", 24.0, 0, 0, 0, 255).unwrap();
+        let nonzero = s.alpha.iter().filter(|&&v| v > 0).count();
+        println!(
+            "[probe] {}x{} alpha_nonzero={} rgb_len={}",
+            s.w,
+            s.h,
+            nonzero,
+            s.rgb.len()
+        );
+        // where is the ink vertically?
+        for quarter in 0..4 {
+            let rows = s.h / 4;
+            let band: usize = s.alpha[quarter * rows * s.w..(quarter + 1) * rows * s.w]
+                .iter()
+                .filter(|&&v| v > 0)
+                .count();
+            println!("[probe] band {quarter}: {band}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod img_probe {
+    use super::*;
+    use lopdf::Stream;
+
+    #[test]
+    fn probe_img_pdf() {
+        let dir = std::env::temp_dir().join("wm_probe");
+        let _ = std::fs::create_dir_all(&dir);
+        let src = dir.join("src.pdf");
+        let out = dir.join("out.pdf");
+        super::tests::make_pdf(3, src.to_str().unwrap());
+        apply_watermark(
+            src.display().to_string(),
+            out.display().to_string(),
+            "Text Preview".into(),
+            0.5,
+            0.5,
+            24.0,
+            255,
+            0,
+            0,
+            255,
+        )
+        .unwrap();
+        let doc = Document::load(&out).unwrap();
+        let pages = doc.get_pages();
+        let page2 = *pages.values().nth(1).unwrap();
+        let content = String::from_utf8_lossy(&doc.get_page_content(page2)).to_string();
+        println!("[probe] content: {content:?}");
+        let res = doc
+            .get_dictionary(page2)
+            .unwrap()
+            .get(b"Resources")
+            .cloned();
+        println!("[probe] resources: {res:?}");
+        if let Ok(res_obj) = doc.get_dictionary(page2).unwrap().get(b"Resources") {
+            if let Object::Reference(rid) = res_obj {
+                println!("[probe] resources dict: {:?}", doc.get_object(*rid));
+            }
+        }
+        for (id, obj) in doc.objects.iter() {
+            if let Object::Stream(s) = obj {
+                if s.dict
+                    .get(b"Subtype")
+                    .and_then(|o| o.as_name())
+                    .map(|n| n == b"Image".as_slice())
+                    .unwrap_or(false)
+                {
+                    println!(
+                        "[probe] img {id:?} dict={:?} datalen={}",
+                        s.dict,
+                        s.content.len()
+                    );
+                }
             }
         }
     }

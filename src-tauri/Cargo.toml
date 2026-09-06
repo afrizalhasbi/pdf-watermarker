@@ -26,3 +26,4 @@ tauri-plugin-log = "2"
 lopdf = { version = "0.44", default-features = false }
 tauri-plugin-dialog = "2"
 base64 = "0.22"
+fontdue = "0.9"
