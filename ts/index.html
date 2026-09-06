@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Watermarker</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main>
+      <div id="preview-zone">
+        <div id="empty-state">
+          <button id="load-btn" type="button">Load PDF</button>
+          <p>or drop a PDF file here</p>
+        </div>
+        <div id="preview" hidden>
+          <div id="page-box">
+            <embed id="page-embed" type="application/pdf" />
+            <div id="watermark-label" hidden></div>
+          </div>
+        </div>
+      </div>
+      <aside>
+        <div class="field">
+          <label for="text-input">Text</label>
+          <input id="text-input" type="text" placeholder="Watermark text" />
+        </div>
+        <div class="field">
+          <span class="caption">Color</span>
+          <div class="sliders">
+            <label>R<input id="ch-r" type="range" min="0" max="255" value="0" /></label>
+            <label>G<input id="ch-g" type="range" min="0" max="255" value="0" /></label>
+            <label>B<input id="ch-b" type="range" min="0" max="255" value="0" /></label>
+            <label>A<input id="ch-a" type="range" min="0" max="255" value="153" /></label>
+          </div>
+          <div id="swatch"></div>
+        </div>
+        <div class="field">
+          <label>Size<input id="ch-size" type="range" min="6" max="144" value="24" /></label>
+          <span id="size-val">24pt</span>
+        </div>
+        <button id="finish-btn" type="button" disabled>Finish</button>
+      </aside>
+    </main>
+    <div id="modal-backdrop" hidden>
+      <div id="modal">
+        <p id="modal-msg"></p>
+        <button id="modal-close" type="button">OK</button>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
