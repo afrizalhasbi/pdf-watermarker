@@ -156,15 +156,17 @@ fn render_stamp(text: &str, font_size: f64, r: u8, g: u8, b: u8, a: u8) -> Resul
     // ink bbox in raster space (top-down, baseline at 0)
     let mut left = i32::MAX;
     let mut right = i32::MIN;
-    let mut top = i32::MAX;
-    let mut bottom = i32::MIN;
+    let mut top = i32::MIN;
+    let mut bottom = i32::MAX;
     for (p, m, _) in &glyphs {
         left = left.min((*p) as i32 + m.xmin);
         right = right.max((*p) as i32 + m.xmin + m.width as i32);
-        top = top.min(m.ymin);
-        bottom = bottom.max(m.ymin + m.height as i32);
+        // fontdue: ymin = bitmap BOTTOM relative to baseline (up-positive);
+        // bitmap row 0 is the top, at ymin + height
+        top = top.max(m.ymin + m.height as i32);
+        bottom = bottom.min(m.ymin);
     }
-    let (w, h) = ((right - left) as usize, (bottom - top) as usize);
+    let (w, h) = ((right - left) as usize, (top - bottom) as usize);
     if w == 0 || h == 0 || w > 16000 || h > 16000 {
         return Err("watermark text rasterized to an invalid bitmap".into());
     }
@@ -173,7 +175,8 @@ fn render_stamp(text: &str, font_size: f64, r: u8, g: u8, b: u8, a: u8) -> Resul
     let mut alpha = vec![0u8; w * h];
     for (p, m, bitmap) in &glyphs {
         let gx = (*p) as i32 + m.xmin - left;
-        let gy = m.ymin - top;
+        // canvas row 0 = ink top; glyph bitmap top sits at (ymin + height) above baseline
+        let gy = top - (m.ymin + m.height as i32);
         for row in 0..m.height {
             for col in 0..m.width {
                 let cov = bitmap[row * m.width + col];
@@ -494,87 +497,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod stamp_probe {
-    #[test]
-    fn probe() {
-        let s = crate::pdf::render_stamp("Text Preview", 24.0, 0, 0, 0, 255).unwrap();
-        let nonzero = s.alpha.iter().filter(|&&v| v > 0).count();
-        println!(
-            "[probe] {}x{} alpha_nonzero={} rgb_len={}",
-            s.w,
-            s.h,
-            nonzero,
-            s.rgb.len()
-        );
-        // where is the ink vertically?
-        for quarter in 0..4 {
-            let rows = s.h / 4;
-            let band: usize = s.alpha[quarter * rows * s.w..(quarter + 1) * rows * s.w]
-                .iter()
-                .filter(|&&v| v > 0)
-                .count();
-            println!("[probe] band {quarter}: {band}");
-        }
-    }
-}
-
-#[cfg(test)]
-mod img_probe {
-    use super::*;
-    use lopdf::Stream;
-
-    #[test]
-    fn probe_img_pdf() {
-        let dir = std::env::temp_dir().join("wm_probe");
-        let _ = std::fs::create_dir_all(&dir);
-        let src = dir.join("src.pdf");
-        let out = dir.join("out.pdf");
-        super::tests::make_pdf(3, src.to_str().unwrap());
-        apply_watermark(
-            src.display().to_string(),
-            out.display().to_string(),
-            "Text Preview".into(),
-            0.5,
-            0.5,
-            24.0,
-            255,
-            0,
-            0,
-            255,
-        )
-        .unwrap();
-        let doc = Document::load(&out).unwrap();
-        let pages = doc.get_pages();
-        let page2 = *pages.values().nth(1).unwrap();
-        let content = String::from_utf8_lossy(&doc.get_page_content(page2)).to_string();
-        println!("[probe] content: {content:?}");
-        let res = doc
-            .get_dictionary(page2)
-            .unwrap()
-            .get(b"Resources")
-            .cloned();
-        println!("[probe] resources: {res:?}");
-        if let Ok(res_obj) = doc.get_dictionary(page2).unwrap().get(b"Resources") {
-            if let Object::Reference(rid) = res_obj {
-                println!("[probe] resources dict: {:?}", doc.get_object(*rid));
-            }
-        }
-        for (id, obj) in doc.objects.iter() {
-            if let Object::Stream(s) = obj {
-                if s.dict
-                    .get(b"Subtype")
-                    .and_then(|o| o.as_name())
-                    .map(|n| n == b"Image".as_slice())
-                    .unwrap_or(false)
-                {
-                    println!(
-                        "[probe] img {id:?} dict={:?} datalen={}",
-                        s.dict,
-                        s.content.len()
-                    );
-                }
-            }
-        }
-    }
-}
