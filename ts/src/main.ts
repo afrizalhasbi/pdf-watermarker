@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen, type Event } from "@tauri-apps/api/event";
+import * as pdfjsLib from "pdfjs-dist";
+import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
 type Meta = { width: number; height: number; page_count: number };
 
@@ -10,7 +14,7 @@ const loadBtn = $<HTMLButtonElement>("load-btn");
 const emptyState = $("empty-state");
 const preview = $("preview");
 const pageBox = $("page-box");
-const pageEmbed = $<HTMLEmbedElement>("page-embed");
+const pageCanvas = $<HTMLCanvasElement>("page-canvas");
 const wmLabel = $("watermark-label");
 const textInput = $<HTMLInputElement>("text-input");
 const sliders = {
@@ -129,23 +133,28 @@ async function loadPdf(path: string) {
   try {
     const meta = await invoke<Meta>("load_pdf", { path });
     // preview a middle page (first and last are never watermarked)
-    const b64 = await invoke<string>("preview_pdf", {
-      path,
-      pageIndex: Math.max(1, meta.page_count - 2),
-    });
+    const b64 = await invoke<string>("pdf_bytes_b64", { path });
     const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-    const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+    const doc = await pdfjsLib.getDocument({ data: bytes }).promise;
+    const page = await doc.getPage(Math.min(doc.numPages, Math.max(2, meta.page_count - 1)));
 
     const aspect = meta.width / meta.height;
-    pageEmbed.src = url;
-    pageBox.style.aspectRatio = `${aspect}`;
-    if (aspect >= 1) {
-      pageBox.style.width = "100%";
-      pageBox.style.height = "auto";
-    } else {
-      pageBox.style.width = "auto";
-      pageBox.style.height = "100%";
-    }
+    // fit the page box into the preview zone (both dimensions)
+    const zone = preview.getBoundingClientRect();
+    const availW = zone.width - 16;
+    const availH = zone.height - 16;
+    const boxW = Math.min(availW, availH * aspect);
+    pageBox.style.width = `${Math.floor(boxW)}px`;
+    pageBox.style.height = `${Math.floor(boxW / aspect)}px`;
+    // render exactly into page-box; canvas maps 1:1 to PDF page coordinates
+    const base = page.getViewport({ scale: 1 });
+    const scale = (boxW / base.width) * (window.devicePixelRatio || 1);
+    const vp = page.getViewport({ scale });
+    pageCanvas.width = Math.floor(vp.width);
+    pageCanvas.height = Math.floor(vp.height);
+    pageCanvas.style.width = "100%";
+    pageCanvas.style.height = "100%";
+    await page.render({ canvas: pageCanvas, viewport: vp }).promise;
 
     emptyState.hidden = true;
     preview.hidden = false;

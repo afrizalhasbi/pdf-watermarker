@@ -123,6 +123,13 @@ pub fn preview_pdf(path: String, page_index: u32) -> Result<String, String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(out))
 }
 
+/// Whole source file as base64 (frontend pdf.js preview).
+#[tauri::command]
+pub fn pdf_bytes_b64(path: String) -> Result<String, String> {
+    let bytes = std::fs::read(&path).map_err(err)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 /// Liberation Sans (metrically compatible with Arial, freely redistributable).
 static STAMP_FONT: &[u8] = include_bytes!("../assets/LiberationSans-Regular.ttf");
 

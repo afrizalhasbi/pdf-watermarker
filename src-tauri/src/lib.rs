@@ -7,6 +7,7 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       pdf::load_pdf,
       pdf::preview_pdf,
+      pdf::pdf_bytes_b64,
       pdf::apply_watermark
     ])
     .setup(|app| {
