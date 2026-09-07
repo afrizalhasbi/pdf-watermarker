@@ -1,6 +1,6 @@
 .PHONY: dev build bundle win-bundle win-build test clean
 
-dev: ## run the app in dev mode (vite + tauri)
+devel: ## run the app in dev mode (vite + tauri)
 	cargo tauri dev
 
 build: ## build release binary (frontend + rust)

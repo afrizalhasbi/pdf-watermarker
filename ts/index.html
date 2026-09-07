@@ -21,8 +21,11 @@
       </div>
       <aside>
         <div class="field">
-          <label for="text-input">Text</label>
-          <textarea id="text-input" rows="3" placeholder="Watermark text"></textarea>
+          <div class="caption-row">
+            <span class="caption">Texts</span>
+            <button id="add-text-btn" type="button" title="Add text">+</button>
+          </div>
+          <div id="text-list"></div>
         </div>
         <div class="field">
           <span class="caption">Color</span>
@@ -33,10 +36,6 @@
             <label>A<input id="ch-a" type="range" min="0" max="255" value="153" /></label>
           </div>
           <div id="swatch"></div>
-        </div>
-        <div class="field">
-          <label>Size<input id="ch-size" type="range" min="6" max="144" value="24" /></label>
-          <span id="size-val">24pt</span>
         </div>
         <button id="finish-btn" type="button" disabled>Finish</button>
       </aside>

@@ -87,7 +87,7 @@ main {
   height: 100%;
 }
 
-#watermark-label {
+.watermark-label {
   position: absolute;
   transform: translate(-50%, -50%);
   padding: 2px 6px;
@@ -99,7 +99,12 @@ main {
   z-index: 2;
 }
 
-#watermark-label:active {
+.watermark-label.selected {
+  outline: 2px dashed rgba(0, 0, 0, 0.5);
+  z-index: 3;
+}
+
+.watermark-label:active {
   cursor: grabbing;
 }
 
@@ -110,6 +115,7 @@ aside {
   display: flex;
   flex-direction: column;
   gap: 22px;
+  overflow-y: auto;
 }
 
 .field {
@@ -124,16 +130,112 @@ aside {
   color: var(--muted);
 }
 
-#text-input {
+.caption-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.caption-row .caption {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.row-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.row-controls input[type="number"] {
+  width: 56px;
+  height: 26px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.row-controls select {
+  height: 26px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.row-btn {
+  width: 22px;
+  height: 22px;
+  line-height: 1;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.row-btn:hover {
+  background: #f0f0f0;
+  color: var(--text);
+}
+
+.text-row:only-child .row-btn {
+  display: none;
+}
+
+#add-text-btn {
+  width: 24px;
+  height: 24px;
+  line-height: 1;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+#add-text-btn:hover {
+  background: #f0f0f0;
+}
+
+#text-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.text-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.text-row.selected {
+  border-color: var(--accent);
+}
+
+.text-row textarea {
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 14px;
   background: var(--bg);
   color: var(--text);
+  resize: vertical;
 }
 
-#text-input:focus {
+.text-row textarea:focus {
   outline: none;
   border-color: var(--accent);
 }
@@ -162,15 +264,6 @@ input[type="range"] {
   height: 24px;
   border: 1px solid var(--border);
   border-radius: 4px;
-}
-
-#size-val {
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.field:has(#ch-size) {
-  flex-direction: column;
 }
 
 #finish-btn {

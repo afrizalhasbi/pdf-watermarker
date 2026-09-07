@@ -1,6 +1,6 @@
 use base64::Engine;
 use lopdf::{Document, Object, ObjectId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Serialize)]
@@ -8,6 +8,16 @@ pub struct Meta {
     width: f64,
     height: f64,
     page_count: u32,
+}
+
+#[derive(Deserialize)]
+pub struct TextItem {
+    pub text: String,
+    pub font_size: f64,
+    pub x_frac: f64,
+    pub y_frac: f64,
+    #[serde(default)]
+    pub align: Option<String>,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -131,7 +141,7 @@ pub fn pdf_bytes_b64(path: String) -> Result<String, String> {
 }
 
 /// Liberation Sans (metrically compatible with Arial, freely redistributable).
-static STAMP_FONT: &[u8] = include_bytes!("../assets/LiberationSans-Regular.ttf");
+static STAMP_FONT: &[u8] = include_bytes!("../assets/GlacialIndifference-Regular.otf");
 
 /// Render text at font_size pt (rasterized at RASTER_SCALE for crispness).
 /// Returns RGB + separate alpha plane plus ink dimensions.
@@ -144,7 +154,25 @@ struct Stamp {
 
 const RASTER_SCALE: f32 = 4.0;
 
-fn render_stamp(text: &str, font_size: f64, r: u8, g: u8, b: u8, a: u8) -> Result<Stamp, String> {
+/// Horizontal alignment of lines within the ink block.
+#[derive(Clone, Copy, PartialEq)]
+enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+impl Align {
+    fn factor(self) -> f32 {
+        match self {
+            Align::Left => 0.0,
+            Align::Center => 0.5,
+            Align::Right => 1.0,
+        }
+    }
+}
+
+fn render_stamp(text: &str, font_size: f64, align: Align, r: u8, g: u8, b: u8, a: u8) -> Result<Stamp, String> {
     if text.is_empty() {
         return Err("watermark text is empty".into());
     }
@@ -157,6 +185,7 @@ fn render_stamp(text: &str, font_size: f64, r: u8, g: u8, b: u8, a: u8) -> Resul
         .map(|m| (m.ascent - m.descent).round() as i32)
         .unwrap_or((px * 1.2).round() as i32);
     let mut glyphs: Vec<(f32, i32, fontdue::Metrics, Vec<u8>)> = Vec::new();
+    let mut line_widths: Vec<f32> = Vec::new();
     for (li, line) in text.split('\n').enumerate() {
         let baseline = -(line_h * li as i32); // up-positive raster space
         let mut pen = 0.0f32;
@@ -165,6 +194,26 @@ fn render_stamp(text: &str, font_size: f64, r: u8, g: u8, b: u8, a: u8) -> Resul
             glyphs.push((pen, baseline, m, bitmap));
             pen += m.advance_width;
         }
+        line_widths.push(pen);
+    }
+
+    // alignment: shift each line so it sits left/center/right within the block
+    let max_w = line_widths.iter().cloned().fold(0.0f32, f32::max);
+    // lines are contiguous runs sharing the same baseline
+    let mut shift_by_glyph: Vec<f32> = Vec::with_capacity(glyphs.len());
+    {
+        let mut li = 0usize;
+        for (_p, bl, _, _) in &glyphs {
+            let expected = -(line_h * li as i32);
+            if *bl != expected {
+                li += 1;
+            }
+            let w = line_widths.get(li).copied().unwrap_or(0.0);
+            shift_by_glyph.push((max_w - w) * align.factor());
+        }
+    }
+    for ((p, _, _, _), shift) in glyphs.iter_mut().zip(shift_by_glyph) {
+        *p += shift;
     }
 
     // ink bbox in raster space (top-down, baseline at 0)
@@ -218,10 +267,7 @@ fn render_stamp(text: &str, font_size: f64, r: u8, g: u8, b: u8, a: u8) -> Resul
 pub fn apply_watermark(
     path: String,
     out_path: String,
-    text: String,
-    x_frac: f64,
-    y_frac: f64,
-    font_size: f64,
+    texts: Vec<TextItem>,
     r: u8,
     g: u8,
     b: u8,
@@ -232,79 +278,108 @@ pub fn apply_watermark(
     if pages.len() < 3 {
         return Err("PDF needs at least 3 pages (first and last are skipped)".into());
     }
-    if !(0.0..=1.0).contains(&x_frac) || !(0.0..=1.0).contains(&y_frac) {
-        return Err("watermark position out of bounds".into());
+    if texts.is_empty() {
+        return Err("no watermark texts provided".into());
+    }
+    for t in &texts {
+        if !(0.0..=1.0).contains(&t.x_frac) || !(0.0..=1.0).contains(&t.y_frac) {
+            return Err("watermark position out of bounds".into());
+        }
     }
 
-    // no text operators, no font references: stamp a pre-rendered image
-    let stamp = render_stamp(&text, font_size, r, g, b, a)?;
-    let smask_id = doc.add_object(lopdf::Stream::new(
-        {
-            let mut d = lopdf::Dictionary::new();
-            d.set("Type", Object::Name(b"XObject".to_vec()));
-            d.set("Subtype", Object::Name(b"Image".to_vec()));
-            d.set("Width", Object::Integer(stamp.w as i64));
-            d.set("Height", Object::Integer(stamp.h as i64));
-            d.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
-            d.set("BitsPerComponent", Object::Integer(8));
-            d
-        },
-        stamp.alpha.clone(),
-    ));
-    let image_id = doc.add_object(lopdf::Stream::new(
-        {
-            let mut d = lopdf::Dictionary::new();
-            d.set("Type", Object::Name(b"XObject".to_vec()));
-            d.set("Subtype", Object::Name(b"Image".to_vec()));
-            d.set("Width", Object::Integer(stamp.w as i64));
-            d.set("Height", Object::Integer(stamp.h as i64));
-            d.set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
-            d.set("BitsPerComponent", Object::Integer(8));
-            d.set("SMask", Object::Reference(smask_id));
-            d
-        },
-        stamp.rgb.clone(),
-    ));
-
-    let w_pt = stamp.w as f64 / RASTER_SCALE as f64;
-    let h_pt = stamp.h as f64 / RASTER_SCALE as f64;
+    // render each text into its own image XObject
+    let mut stamps: Vec<(f64, f64, ObjectId)> = Vec::new();
+    for item in &texts {
+        let align = match item.align.as_deref().unwrap_or("center") {
+            "left" => Align::Left,
+            "right" => Align::Right,
+            _ => Align::Center,
+        };
+        let stamp = render_stamp(&item.text, item.font_size, align, r, g, b, a)?;
+        let smask_id = doc.add_object(lopdf::Stream::new(
+            {
+                let mut d = lopdf::Dictionary::new();
+                d.set("Type", Object::Name(b"XObject".to_vec()));
+                d.set("Subtype", Object::Name(b"Image".to_vec()));
+                d.set("Width", Object::Integer(stamp.w as i64));
+                d.set("Height", Object::Integer(stamp.h as i64));
+                d.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+                d.set("BitsPerComponent", Object::Integer(8));
+                d
+            },
+            stamp.alpha.clone(),
+        ));
+        let image_id = doc.add_object(lopdf::Stream::new(
+            {
+                let mut d = lopdf::Dictionary::new();
+                d.set("Type", Object::Name(b"XObject".to_vec()));
+                d.set("Subtype", Object::Name(b"Image".to_vec()));
+                d.set("Width", Object::Integer(stamp.w as i64));
+                d.set("Height", Object::Integer(stamp.h as i64));
+                d.set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+                d.set("BitsPerComponent", Object::Integer(8));
+                d.set("SMask", Object::Reference(smask_id));
+                d
+            },
+            stamp.rgb.clone(),
+        ));
+        stamps.push((
+            stamp.w as f64 / RASTER_SCALE as f64,
+            stamp.h as f64 / RASTER_SCALE as f64,
+            image_id,
+        ));
+    }
 
     // watermark every page except first and last
     for (_, page_id) in pages.iter().skip(1).take(pages.len().saturating_sub(2)) {
         let mb = mediabox(&doc, *page_id)?;
         let (w, h) = ((mb[2] - mb[0]).abs(), (mb[3] - mb[1]).abs());
-        // drag position = center of the stamped image
-        let x = mb[0] + x_frac * w - w_pt / 2.0;
-        let y = mb[1] + (1.0 - y_frac) * h - h_pt / 2.0;
-        println!(
-            "[wm] page: Box=({},{},{},{}) w={w} h={h} x_frac={x_frac} y_frac={y_frac} -> x={x} y={y} {w_pt}x{h_pt}pt",
-            mb[0], mb[1], mb[2], mb[3]
-        );
 
-        // ensure page resources have our XObject
-        let resources = ensure_resources(&mut doc, *page_id)?;
-        let xo_val = {
-            let res = doc.get_object(resources).map_err(err)?;
-            let d = Object::as_dict(res).map_err(|_| "resources not a dictionary")?;
-            d.get(b"XObject").cloned().ok()
-        };
-        let xo_entry = match xo_val {
-            Some(Object::Reference(id)) => id,
-            Some(o @ Object::Dictionary(_)) => doc.add_object(o),
-            _ => doc.add_object(Object::Dictionary(lopdf::Dictionary::new())),
-        };
-        let xo_obj = doc
-            .get_object_mut(xo_entry)
-            .and_then(Object::as_dict_mut)
-            .map_err(err)?;
-        xo_obj.set("Im0", Object::Reference(image_id));
-        // make sure the resources dict actually points at the XObject dict
-        doc.get_object_mut(resources)
-            .and_then(Object::as_dict_mut)
-            .map_err(err)?
-            .set("XObject", Object::Reference(xo_entry));
+        let mut resources_ops: Option<ObjectId> = None;
+        let mut ops = String::new();
+        for (i, item) in texts.iter().enumerate() {
+            let (w_pt, h_pt, image_id) = stamps[i];
+            // drag position = center of the stamped image
+            let x = mb[0] + item.x_frac * w - w_pt / 2.0;
+            let y = mb[1] + (1.0 - item.y_frac) * h - h_pt / 2.0;
+            println!(
+                "[wm] page: Box=({},{},{},{}) w={w} h={h} x_frac={} y_frac={} -> x={x} y={y} {w_pt}x{h_pt}pt",
+                mb[0], mb[1], mb[2], mb[3], item.x_frac, item.y_frac
+            );
 
-        let ops = format!("\nq {w_pt} 0 0 {h_pt} {x} {y} cm /Im0 Do Q\n");
+            // ensure page resources have our XObject
+            let resources = match resources_ops {
+                Some(id) => id,
+                None => {
+                    let id = ensure_resources(&mut doc, *page_id)?;
+                    resources_ops = Some(id);
+                    id
+                }
+            };
+            let xo_val = {
+                let res = doc.get_object(resources).map_err(err)?;
+                let d = Object::as_dict(res).map_err(|_| "resources not a dictionary")?;
+                d.get(b"XObject").cloned().ok()
+            };
+            let xo_entry = match xo_val {
+                Some(Object::Reference(id)) => id,
+                Some(o @ Object::Dictionary(_)) => doc.add_object(o),
+                _ => doc.add_object(Object::Dictionary(lopdf::Dictionary::new())),
+            };
+            let name = format!("Im{i}");
+            let xo_obj = doc
+                .get_object_mut(xo_entry)
+                .and_then(Object::as_dict_mut)
+                .map_err(err)?;
+            xo_obj.set(name.as_bytes(), Object::Reference(image_id));
+            // make sure the resources dict actually points at the XObject dict
+            doc.get_object_mut(resources)
+                .and_then(Object::as_dict_mut)
+                .map_err(err)?
+                .set("XObject", Object::Reference(xo_entry));
+
+            ops.push_str(&format!("\nq {w_pt} 0 0 {h_pt} {x} {y} cm /{name} Do Q\n"));
+        }
         doc.add_page_contents(*page_id, ops.into_bytes())
             .map_err(err)?;
     }
@@ -487,10 +562,13 @@ mod tests {
         apply_watermark(
             p.to_string(),
             out.to_string(),
-            "CONFIDENTIAL".into(),
-            0.5,
-            0.5,
-            24.0,
+            vec![TextItem {
+                text: "CONFIDENTIAL".into(),
+                font_size: 24.0,
+                x_frac: 0.5,
+                y_frac: 0.5,
+                align: Some("center".into()),
+            }],
             255,
             0,
             0,
@@ -506,7 +584,78 @@ mod tests {
             let has_wm = content.contains("/Im0 Do");
             assert_eq!(has_wm, n > &1 && n < &4, "page {n} watermark wrong");
         }
-        // stamp is a real image XObject with SMask, sized ~ font_size pt tall
-        let _ = doc;
     }
-}
+
+    #[test]
+    fn test_apply_watermark_multiple_texts() {
+        let p = "/tmp/opencode/wm_test.pdf";
+        let out = "/tmp/opencode/wm_multi.pdf";
+        make_pdf(4, p);
+        apply_watermark(
+            p.to_string(),
+            out.to_string(),
+            vec![
+                TextItem {
+                    text: "FIRST".into(),
+                    font_size: 24.0,
+                    x_frac: 0.5,
+                    y_frac: 0.3,
+                    align: Some("left".into()),
+                },
+                TextItem {
+                    text: "SECOND".into(),
+                    font_size: 48.0,
+                    x_frac: 0.25,
+                    y_frac: 0.7,
+                    align: Some("right".into()),
+                },
+            ],
+            0,
+            0,
+            0,
+            128,
+        )
+        .unwrap();
+        let doc = Document::load(out).unwrap();
+        let pages = doc.get_pages();
+        for (n, id) in &pages {
+            let content = String::from_utf8_lossy(&doc.get_page_content(*id)).into_owned();
+            let stamped = content.contains("/Im0 Do") && content.contains("/Im1 Do");
+            assert_eq!(stamped, n > &1 && n < &4, "page {n} watermarks wrong");
+        }
+    }
+
+    #[test]
+    fn test_render_stamp_alignment_bounds() {
+        // left/center/right all produce identical ink size, just shifted
+        let a = render_stamp("AB\nC", 24.0, Align::Left, 0, 0, 0, 255).unwrap();
+        let b = render_stamp("AB\nC", 24.0, Align::Center, 0, 0, 0, 255).unwrap();
+        let c = render_stamp("AB\nC", 24.0, Align::Right, 0, 0, 0, 255).unwrap();
+        assert_eq!((a.w, a.h), (b.w, b.h));
+        assert_eq!((b.w, b.h), (c.w, c.h));
+        // center/right must shift glyphs rightwards within the block
+        let nonzero = b
+            .alpha
+            .iter()
+            .zip(c.alpha.iter())
+            .filter(|(x, y)| x != y)
+            .count();
+        assert!(nonzero > 0, "alignment should change pixel layout");
+    }
+
+    #[test]
+    fn debug_align_visual() {
+        for (name, s) in [
+            ("L", render_stamp("ABC\nD", 24.0, Align::Left, 0, 0, 0, 255).unwrap()),
+            ("R", render_stamp("ABC\nD", 24.0, Align::Right, 0, 0, 0, 255).unwrap()),
+        ] {
+            println!("== {name} w={} h={}", s.w, s.h);
+            for row in (0..s.h).step_by(8) {
+                let line: String = (0..s.w)
+                    .step_by(4)
+                    .map(|x| if s.alpha[row * s.w + x] > 0 { '#' } else { '.' })
+                    .collect();
+                println!("{line}");
+            }
+        }
+    }}
