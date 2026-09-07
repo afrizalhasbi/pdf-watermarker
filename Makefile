@@ -15,6 +15,9 @@ win-bundle: ## windows installer bundle (run on a windows machine)
 
 win-build: ## windows release exe only (run on a windows machine)
 	cargo tauri build --no-bundle --runner cargo-xwin --target x86_64-pc-windows-msvc
+	mv /home/host/Core/Watermarker/src-tauri/target/x86_64-pc-windows-msvc/release/app.exe watermarker.exe
+	echo Zipping...
+	zip watermarker.exe.zip watermarker.exe
 
 test:
 	cd src-tauri && cargo test
